@@ -1,0 +1,1 @@
+NAS_ROOT=\\YOUR-NAS-IP\your-share\workbuddy

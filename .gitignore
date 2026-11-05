@@ -1,0 +1,14 @@
+# 本机实际配置（含内网地址，勿提交）
+sync-config.txt
+
+# Python 运行产物
+__pycache__/
+*.pyc
+
+# 备份与冲突副本
+*.bak-*
+*.conflict-*
+
+# 编辑器
+.vscode/
+.idea/
