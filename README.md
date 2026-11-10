@@ -38,6 +38,24 @@
 
 > 没有 NAS？直接看 **[云盘中转同步指南](docs/CLOUD-RELAY-GUIDE.md)**，用网盘挂载当虚拟 NAS。
 
+### 第 0 步：获取并安装脚本（两台电脑都做）
+
+**方式一：下载 ZIP（无需安装 git）**
+
+1. 在本仓库页面点击绿色 **`<> Code`** 按钮 → **Download ZIP**；
+2. 解压下载的 `workbuddy-sync-main.zip`；
+3. 把解压目录里 `scripts\` 下的**全部文件**复制到 `%USERPROFILE%\WorkBuddy\scripts\`（即 `C:\Users\<你的用户名>\WorkBuddy\scripts\`；该目录不存在就新建一个）。
+
+**方式二：git clone（会用 git 的用户）**
+
+```bat
+git clone https://github.com/yyfeng0709/workbuddy-sync.git
+cd workbuddy-sync
+xcopy /E /Y scripts "%USERPROFILE%\WorkBuddy\scripts\"
+```
+
+> 仓库里只有 `sync-config.example.txt` / `sync-config-cloud.example.txt` 模板，不含任何真实配置——如果 `scripts\` 目录已有旧版文件，直接覆盖即可，不会动你的本地配置。
+
 ### 第 1 步：配置 NAS 路径（两台电脑都做）
 
 ```bat

@@ -132,9 +132,9 @@ Z:\<你的云盘挂载目录>\workbuddy\
 └── scripts\
 ```
 
-### 2.2 配置文件（两台电脑各做一遍）
+### 2.2 安装脚本并配置（两台电脑各做一遍）
 
-1. 把本仓库 `scripts/` 下所有文件放进 `%USERPROFILE%\WorkBuddy\scripts\`；
+1. **获取脚本**（还没装过本套件的话）：仓库页面绿色 **`<> Code`** → **Download ZIP** → 解压 → 把 `scripts\` 下全部文件复制到 `%USERPROFILE%\WorkBuddy\scripts\`（详见主 README 的"第 0 步"）；
 2. 复制模板为真实配置：
    ```bat
    cd %USERPROFILE%\WorkBuddy\scripts
