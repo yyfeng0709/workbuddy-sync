@@ -1,0 +1,1 @@
+NAS_ROOT=Z:/your-cloud-mount/workbuddy

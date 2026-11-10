@@ -27,7 +27,55 @@ NAS_ROOT = load_nas_root()
 USER_DIR = os.path.join(os.environ["USERPROFILE"], ".workbuddy")
 LOCAL_DB = os.path.join(USER_DIR, "workbuddy.db")
 CANON_DIR = os.path.join(NAS_ROOT, "sessions-merge")
-CANON_DB = os.path.join(CANON_DIR, "canonical.db")
+CANON_DB_NAS = os.path.join(CANON_DIR, "canonical.db")   # relay-side copy (SQLite file)
+
+
+def _is_mounted_root():
+    """True when NAS_ROOT is a drive-letter mount (cloud track via
+    RaiDrive/OpenList/CloudDrive2) rather than an SMB UNC path."""
+    root = os.path.abspath(NAS_ROOT)
+    return bool(os.path.splitdrive(root)[0]) and not root.startswith("\\\\")
+
+
+# Cloud-track SQLite handling (2026-11-09): SQLite needs locking + random
+# writes that WebDAV-mounted cloud relays cannot honor — running the canonical
+# DB directly on the mount crashed with 'disk I/O error' (observed on the home
+# PC first cloud run). Instead: download the relay copy to a LOCAL working db,
+# merge locally (SQLite safe), then upload back as a whole file. The relay
+# never sees SQLite mid-transaction.
+_CANON_DB_LOCAL = os.path.join(USER_DIR, ".canonical.cloudtrack.db")
+
+
+def _canonical_db_paths():
+    """Return (working_db_path, is_cloud_track). Cloud track stages the relay
+    copy into a local file first; NAS track uses the relay path directly."""
+    if _is_mounted_root():
+        return _CANON_DB_LOCAL, True
+    return CANON_DB_NAS, False
+
+
+def _stage_canonical_down():
+    """Cloud track: copy relay canonical.db -> local working db (if present)."""
+    if os.path.isfile(CANON_DB_NAS):
+        shutil.copyfile(CANON_DB_NAS, _CANON_DB_LOCAL)
+        return True
+    return False
+
+
+def _stage_canonical_up():
+    """Cloud track: upload local working db -> relay as a whole file
+    (write-tmp-then-rename for gateway compatibility)."""
+    os.makedirs(CANON_DIR, exist_ok=True)
+    tmp = CANON_DB_NAS + ".uploading"
+    shutil.copyfile(_CANON_DB_LOCAL, tmp)
+    try:
+        os.replace(tmp, CANON_DB_NAS)
+    except OSError:
+        try:
+            os.remove(CANON_DB_NAS)
+        except OSError:
+            pass
+        os.rename(tmp, CANON_DB_NAS)
 
 # Deletion-tombstone plumbing (task #4/#5/#6): when a session is deleted on one
 # PC, its files must be removed from BOTH the local machine AND the NAS so the
@@ -259,7 +307,8 @@ def _tombstones():
     sessions.deleted_at for soft-deletes not yet mirrored. Each source is read
     independently so a missing table doesn't discard the others."""
     tombs = {}
-    for db in (LOCAL_DB, CANON_DB):
+    _canon, _ = _canonical_db_paths()   # cloud track -> local staged copy
+    for db in (LOCAL_DB, _canon):
         if not os.path.isfile(db):
             continue
         try:
@@ -430,20 +479,62 @@ def nas_reachable(host, timeout=4.0):
     return False
 
 
+def drive_reachable(root, timeout=8.0):
+    """Mounted-drive (Z:\\ via WB_SYNC_ROOT) reachability: real write+read+
+    delete probe, because a dead mount can still answer isdir() from cache."""
+    drive = os.path.splitdrive(os.path.abspath(root))[0]
+    if not os.path.isdir(drive + os.sep):
+        return False, f"drive {drive} not mounted (gateway software not running?)"
+    probe = os.path.join(root, f".probe.{os.environ.get('COMPUTERNAME','unknown')}.tmp")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write(str(int(time.time())))
+        with open(probe, "r", encoding="utf-8") as f:
+            _ = f.read(16)
+        try:
+            os.remove(probe)
+        except OSError:
+            pass  # cleanup is best-effort (safe-delete hooks may block Z: removals)
+        return True, "probe ok"
+    except OSError as e:
+        probe2 = os.path.join(drive + os.sep, ".probe.tmp")
+        try:
+            with open(probe2, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+            os.remove(probe2)
+            return True, "probe ok at drive root (sync root will be created)"
+        except OSError:
+            return False, f"write probe failed: {e}"
+
+
 def main():
     if not os.path.isfile(LOCAL_DB):
         print("Local workbuddy.db not found; nothing to do.")
         return
 
-    # --- Fast NAS reachability pre-check (avoid SMB hang on dead UNC path) ---
-    host = _nas_host(NAS_ROOT)
-    print(f"Checking NAS ({host}) reachability ...")
-    if not nas_reachable(host, timeout=2.5):
-        print("ERROR: NAS host unreachable within 4s (no answer on TCP 445/139).")
-        print("  The sessions-merge store lives on the NAS; cannot proceed.")
-        print("  NAS_ROOT = " + NAS_ROOT)
-        print("  Connect to the same network / VPN as the NAS, then re-run.")
-        return
+    # --- Fast reachability pre-check (avoid SMB hang on dead UNC path) ---
+    # Dual-track (2026-11-09): drive-letter roots (WB_SYNC_ROOT) are not SMB
+    # hosts; probe them with a real write instead of TCP 445.
+    if os.path.splitdrive(os.path.abspath(NAS_ROOT))[0] and not NAS_ROOT.startswith("\\\\"):
+        drive, _ = os.path.splitdrive(os.path.abspath(NAS_ROOT))
+        print(f"Checking mounted drive ({drive}) reachability ...")
+        ok, detail = drive_reachable(NAS_ROOT)
+        if not ok:
+            print("ERROR: mounted sync drive is not usable.")
+            print(f"  Detail: {detail}")
+            print("  NAS_ROOT = " + NAS_ROOT)
+            print("  Start the gateway (RaiDrive/CloudDrive2/OpenList), then re-run.")
+            return
+        print(f"  ({detail})")
+    else:
+        host = _nas_host(NAS_ROOT)
+        print(f"Checking NAS ({host}) reachability ...")
+        if not nas_reachable(host, timeout=2.5):
+            print("ERROR: NAS host unreachable within 4s (no answer on TCP 445/139).")
+            print("  The sessions-merge store lives on the NAS; cannot proceed.")
+            print("  NAS_ROOT = " + NAS_ROOT)
+            print("  Connect to the same network / VPN as the NAS, then re-run.")
+            return
 
     # --- Cross-machine concurrency lock (same lock as sync-bidirectional.py) ---
     # Reuse the lock so the whole one-click flow (sync + merge) is mutually
@@ -461,6 +552,15 @@ def main():
 
     os.makedirs(CANON_DIR, exist_ok=True)
     ensure_tombstone_table(LOCAL_DB)
+
+    # Cloud track: stage the relay canonical.db down to a local file so all
+    # SQLite work happens on a real disk (the WebDAV mount cannot host SQLite).
+    CANON_DB, _cloud_track = _canonical_db_paths()
+    if _cloud_track:
+        if _stage_canonical_down():
+            print("  [cloud] staged canonical.db down to local disk for merge")
+        else:
+            print("  [cloud] no relay canonical.db yet — will create locally and upload")
 
     # Tables to merge across PCs. Each entry: (table, id_col, choice_fn).
     #  - sessions                  : conversation index (fixes /resume list)
@@ -522,6 +622,12 @@ def main():
 
     if created:
         print(f"Created {created} missing working-dir(s) so sessions open without the 'deleted workspace' warning.")
+
+    # Cloud track: upload the merged working db back to the relay as a whole
+    # file (AFTER all SQLite operations are complete and the connection closed).
+    if _cloud_track:
+        _stage_canonical_up()
+        print("  [cloud] uploaded merged canonical.db back to the relay")
 
     print("Now restart WorkBuddy -> /resume should list all sessions from every PC,")
     print("and your automations should appear on both PCs.")

@@ -1,7 +1,13 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title WorkBuddy One-Click Sync + Merge
+title WorkBuddy Sync via NAS (SMB)
+
+rem ==== NAS TRACK ====
+rem Uses NAS_ROOT from sync-config.txt (SMB share). Clear any track overrides
+rem so external leftovers cannot leak into this track.
+set "WB_SYNC_ROOT="
+set "WB_SYNC_CONFIG="
 
 set PYTHON=%USERPROFILE%\.workbuddy\binaries\python\versions\3.13.12\python.exe
 set DIR=%~dp0
@@ -12,7 +18,7 @@ if not exist "%PYTHON%" (
 )
 
 echo ============================================================
-echo   WorkBuddy One-Click Sync + Merge
+echo   WorkBuddy One-Click Sync + Merge  [NAS TRACK]
 echo   %DATE% %TIME%
 echo ============================================================
 echo.
@@ -49,7 +55,7 @@ if errorlevel 1 (
 echo.
 
 echo ============================================================
-echo   ALL DONE. Sync + Merge + Report completed.
+echo   ALL DONE. NAS-track Sync + Merge + Report completed.
 echo   Task report: %USERPROFILE%\WorkBuddy\TaskReports\tasks-report.html
 echo   TIP: Reopen WorkBuddy to see the merged sessions/tasks.
 echo ============================================================

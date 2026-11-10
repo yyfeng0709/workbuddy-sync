@@ -1,8 +1,11 @@
 # WorkBuddy 跨设备双向同步套件
 
-让两台（或多台）电脑上的 [WorkBuddy](https://www.workbuddy.cn/) 保持任务、对话、记忆、脚本、工作区文件全部一致——以一台 NAS（或任何 SMB 共享）为中转站，**无需任何云服务**，全程局域网内完成。
+让两台（或多台）电脑上的 [WorkBuddy](https://www.workbuddy.cn/) 保持任务、对话、记忆、脚本、工作区文件全部一致。**两种中转方式任选**：
 
-> 适用于：在家用机和办公机之间切换使用 WorkBuddy、希望两边看到完全相同的任务列表和对话记录、且不想把数据交给第三方云盘的用户。
+- **NAS 轨**：以一台 NAS（或任何 SMB 共享）为中转站，全程局域网、数据不出门；
+- **云盘轨**：没有 NAS 或两台电脑网络不互通？把任意网盘（联通/夸克/阿里/百度/天翼…）经挂载网关当"虚拟 NAS"用——详见 **[云盘中转同步指南](docs/CLOUD-RELAY-GUIDE.md)**。
+
+> 适用于：在家用机和办公机之间切换使用 WorkBuddy、希望两边看到完全相同的任务列表和对话记录的用户。
 
 ## 它同步什么
 
@@ -31,7 +34,9 @@
 - 一台 NAS 或任何可同时被两台电脑访问的 SMB 共享（群晖/威联通/极空间/飞牛/OpenMediaVault/Windows 共享文件夹均可）
 - 无需单独安装 Python：脚本优先使用 WorkBuddy 自带的 Python（`%USERPROFILE%\.workbuddy\binaries\python\...`），找不到时自动回退系统 `python`
 
-## 快速开始
+## 快速开始（NAS 轨）
+
+> 没有 NAS？直接看 **[云盘中转同步指南](docs/CLOUD-RELAY-GUIDE.md)**，用网盘挂载当虚拟 NAS。
 
 ### 第 1 步：配置 NAS 路径（两台电脑都做）
 
@@ -65,7 +70,7 @@ KNOWN_MACHINES = {
 双击运行：
 
 ```bat
-scripts\sync-all.bat
+scripts\sync-nas.bat
 ```
 
 它会依次执行三步：
@@ -76,11 +81,13 @@ scripts\sync-all.bat
 
 完成后重启 WorkBuddy 即可看到合并结果。
 
+**云盘轨**则双击 `scripts\sync-cloud.bat`（需先按 [云盘指南](docs/CLOUD-RELAY-GUIDE.md) 挂载盘符并配置 `sync-config-cloud.txt`）。双轨可并存，交替运行互不干扰，删除操作会跨轨传播（建议每台电脑定期两轨都跑）。
+
 ### 日常使用节奏（重要）
 
 ```
-到一台电脑开始工作前 → 先跑一次 sync-all.bat
-离开这台电脑前      → 再跑一次 sync-all.bat
+到一台电脑开始工作前 → 先跑一次同步（sync-nas.bat 或 sync-cloud.bat）
+离开这台电脑前      → 再跑一次
 ```
 
 串行使用（一次只用一台、切换前先同步）是**最安全**的模式。两台电脑在未同步状态下同时写同一个会话的对话，会触发冲突覆盖（旧内容进 `.conflict` 备份，可手动找回，但不会自动合并）——详见 [docs/SYNC-RISK-ANALYSIS.md](docs/SYNC-RISK-ANALYSIS.md)。
@@ -89,14 +96,16 @@ scripts\sync-all.bat
 
 ```
 scripts/
-├── sync-all.bat             # 一键入口：同步 + 合并 + 报告
-├── sync-bidirectional.py    # 核心：双向文件同步（加性合并/墓碑/锁/机器守卫）
-├── sessions-merge.py        # 会话索引合并进 workbuddy.db（记录级，非整库覆盖）
-├── tasks-report.py          # 生成全局任务报告 HTML
-├── undelete.py              # 从 .trash/ 回收站找回被墓碑删除的文件
-├── sync_config.py           # 读取 sync-config.txt 的 NAS 路径
-├── sync-config.example.txt  # 配置模板（复制为 sync-config.txt 后编辑）
-└── sync-ignore.txt          # 排除清单（类似 .gitignore，支持通配符）
+├── sync-nas.bat                  # NAS 轨入口：同步 + 合并 + 报告（走 sync-config.txt）
+├── sync-cloud.bat                # 云盘轨入口：同步 + 合并 + 报告（走 sync-config-cloud.txt）
+├── sync-bidirectional.py         # 核心：双向文件同步（加性合并/墓碑/锁/机器守卫/网关韧性补丁）
+├── sessions-merge.py             # 会话索引合并进 workbuddy.db（记录级；云轨自动本地 staging）
+├── tasks-report.py               # 生成全局任务报告 HTML
+├── undelete.py                   # 从 .trash/ 回收站找回被墓碑删除的文件
+├── sync_config.py                # 路径解析（WB_SYNC_ROOT/WB_SYNC_CONFIG 环境变量 > 配置文件）
+├── sync-config.example.txt       # NAS 轨配置模板
+├── sync-config-cloud.example.txt # 云盘轨配置模板（挂载盘符路径，可含中文）
+└── sync-ignore.txt               # 排除清单（类似 .gitignore，支持通配符）
 ```
 
 `undelete.py` 用法：误删文件被同步删掉后，运行 `python undelete.py list` 查看 `.trash/` 内容，`python undelete.py restore <文件名>` 恢复。

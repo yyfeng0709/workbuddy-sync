@@ -12,3 +12,5 @@ __pycache__/
 # 编辑器
 .vscode/
 .idea/
+# 云轨真实配置（本机挂载路径，勿提交）
+scripts/sync-config-cloud.txt

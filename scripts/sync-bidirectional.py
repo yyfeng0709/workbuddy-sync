@@ -39,9 +39,9 @@ COMPUTER = os.environ.get("COMPUTERNAME", "unknown")
 # --- Sync ignore list (like .gitignore, for workspace-files) ---
 # File: scripts/sync-ignore.txt (synced itself via the scripts section, so both
 # PCs share ONE list). Lines: workspace-relative paths with * wildcard, e.g.
-#   2026-01-15-10-30-00/mytask/key.cache        (exact file)
-#   *.conflict-*                                 (any conflict backup anywhere)
-#   2026-01-15-10-30-00/mytask/dumps/            (trailing / = whole dir)
+#   2026-09-24-11-27-28/wxstar/key.cache     (exact file)
+#   *.conflict-*                              (any conflict backup anywhere)
+#   2026-09-24-11-27-28/wxstar/dumps/         (trailing / = whole dir)
 # Matching is case-insensitive; forward slashes; a dir pattern also excludes
 # everything under it. Ignored files are NEVER pushed/pulled/compared.
 IGNORE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync-ignore.txt")
@@ -73,7 +73,7 @@ def load_ignore_patterns():
     return pats
 
 def is_ignored(rel_posix, patterns):
-    """rel_posix like '2026-01-15-10-30-00/mytask/key.cache' (already lowered)."""
+    """rel_posix like '2026-09-24-11-27-28/wxstar/key.cache' (already lowered)."""
     for pat in patterns:
         if pat.endswith("/"):
             if rel_posix.startswith(pat) or rel_posix + "/" == pat:
@@ -89,9 +89,9 @@ def is_ignored(rel_posix, patterns):
 # depending on which PC is running WorkBuddy this session. NEVER assume which one
 # is current from memory; ALWAYS detect via COMPUTERNAME (or HOSTNAME). Do NOT infer
 # the machine from service state (e.g. a listening port) or file presence — both PCs
-# may run the same local services.
-# >>> Edit these to YOUR machine names (run `echo %COMPUTERNAME%` on each PC). <<<
+# may run the same local services (e.g. the wxstar 8137 local server).
 KNOWN_MACHINES = {
+    # >>> Edit these to YOUR machine names (run `echo %COMPUTERNAME%` on each PC) <<<
     "OFFICE-PC": "办公电脑 (office)",
     "HOME-PC": "家里电脑 (home)",
 }
@@ -155,6 +155,37 @@ def nas_reachable(host, timeout=4.0):
     return False
 
 
+def drive_reachable(root, timeout=8.0):
+    """Reachability check for a MOUNTED-DRIVE sync root (e.g. Z:\\ via
+    RaiDrive/CloudDrive2/OpenList, set through WB_SYNC_ROOT). A dead mount can
+    still answer isdir() from cache, so verify with a real write+read+delete
+    probe file. Returns (ok, detail)."""
+    drive = os.path.splitdrive(os.path.abspath(root))[0]
+    if not os.path.isdir(drive + os.sep):
+        return False, f"drive {drive} not mounted (gateway software not running?)"
+    probe = os.path.join(root, f".probe.{COMPUTER}.tmp")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write(str(int(time.time())))
+        with open(probe, "r", encoding="utf-8") as f:
+            _ = f.read(16)
+        try:
+            os.remove(probe)
+        except OSError:
+            pass  # cleanup is best-effort (safe-delete hooks may block Z: removals)
+        return True, "probe ok"
+    except OSError as e:
+        # Root may not exist yet (first cloud run) — retry probe on the drive root
+        probe2 = os.path.join(drive + os.sep, f".probe.{COMPUTER}.tmp")
+        try:
+            with open(probe2, "w", encoding="utf-8") as f:
+                f.write(str(int(time.time())))
+            os.remove(probe2)
+            return True, "probe ok at drive root (sync root will be created)"
+        except OSError:
+            return False, f"write probe failed: {e}"
+
+
 
 def file_hash(path):
     """SHA256 of file content. Returns None if file doesn't exist."""
@@ -174,13 +205,22 @@ class SourceVanished(OSError):
     pass
 
 
-def safe_copy2(src, dst, max_tries=12):
+def safe_copy2(src, dst, max_tries=15):
     """Copy src -> dst, retrying on transient SMB oplock / PermissionError.
 
     The NAS SMB share occasionally raises PermissionError or truncates the target
     to 0 bytes mid-write (oplock not released). We retry with exponential backoff
     and verify by size + SHA256 before declaring success; on hard failure we raise
     so the caller can decide (better a noisy error than a silent 0-byte file).
+
+    Gateway-resilience (2026-11-09, cloud track via RaiDrive/OpenList):
+    - WinError 1168 "element not found" hits when a file is created inside a
+      directory that was made moments earlier: the mkdir propagates
+      asynchronously through the gateway chain and the file-create misses.
+      Mitigations: (a) create parent dirs STEPWISE one level at a time so each
+      level is visible before the next; (b) tolerate copystat/utime failures
+      (copy data first, set times best-effort — cloud drivers often reject
+      utime on freshly created files); (c) longer retry window (cap 45s/try).
     """
     src_hash = file_hash(src)
     if src_hash is None:
@@ -189,7 +229,23 @@ def safe_copy2(src, dst, max_tries=12):
     last_err = None
     for attempt in range(1, max_tries + 1):
         try:
-            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+            # (a) stepwise makedirs: one level at a time, verify each exists
+            ddir = os.path.dirname(dst) or "."
+            if not os.path.isdir(ddir):
+                parts = ddir.replace("/", os.sep).split(os.sep)
+                acc = parts[0] + os.sep if os.path.isabs(ddir) else "."
+                start = 1 if os.path.isabs(ddir) else 0
+                # UNC paths: \\host\share\... -> first two parts host+share
+                if ddir.startswith("\\\\") and len(parts) > 3:
+                    acc = os.sep.join(parts[:3]) + os.sep
+                    start = 3
+                for p in parts[start:]:
+                    if not p:
+                        continue
+                    acc = os.path.join(acc, p)
+                    if not os.path.isdir(acc):
+                        os.makedirs(acc, exist_ok=True)
+                        time.sleep(0.15)  # let the gateway register this level
             # Clear the readonly bit if set on the destination (occasionally on NAS files)
             if os.name == "nt" and os.path.exists(dst):
                 try:
@@ -199,7 +255,28 @@ def safe_copy2(src, dst, max_tries=12):
                         ctypes.windll.kernel32.SetFileAttributesW(dst, a & ~0x1)
                 except Exception:
                     pass
-            shutil.copy2(src, dst)
+            # (b) data first (copyfile), metadata best-effort — utime on a
+            # freshly-created gateway file can fail with 1168; don't fail the
+            # whole copy for it, retry utime separately below.
+            if src_size == 0:
+                # Empty-file gateway bug (2026-11-09, observed on cloud drives via OpenList/RaiDrive):
+                # creating a 0-byte file directly fails with WinError 1168 / EACCES,
+                # but "write 1 byte then truncate to 0" succeeds and PERSISTS as 0
+                # bytes. Preserve 0-byte semantics with that dance.
+                with open(dst, "wb") as f:
+                    f.write(b"\x00")
+                with open(dst, "r+b") as f:
+                    f.truncate(0)
+            else:
+                try:
+                    st = os.stat(src)
+                    shutil.copyfile(src, dst)
+                    try:
+                        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+                    except OSError:
+                        pass  # best-effort; hash verify below is what matters
+                except shutil.SameFileError:
+                    pass
             if os.path.getsize(dst) == src_size and file_hash(dst) == src_hash:
                 return
             last_err = f"verify-mismatch (dst size {os.path.getsize(dst)} != {src_size})"
@@ -207,7 +284,7 @@ def safe_copy2(src, dst, max_tries=12):
             last_err = f"{type(e).__name__}: {e}"
         if attempt < max_tries:
             wait = 2.0 * (1.6 ** (attempt - 1))
-            time.sleep(min(wait, 20))
+            time.sleep(min(wait, 45))  # (c) cloud API cooldown can be minutes
     raise IOError(f"safe_copy2 FAILED after {max_tries} tries ({last_err}); src={src} dst={dst}")
 
 
@@ -376,13 +453,26 @@ def acquire_lock():
             # unreadable lock -> assume dead, take over
             pass
     try:
-        with open(LOCK_FILE, "w", encoding="utf-8") as f:
+        # Atomic-ish write for gateway mounts (2026-11-09): open(...,"w") does a
+        # truncate-write that fails with Errno 22 on WebDAV-mounted drives
+        # (RaiDrive/OpenList). Create-then-rename is supported everywhere.
+        tmp_lock = LOCK_FILE + ".tmp"
+        with open(tmp_lock, "w", encoding="utf-8") as f:
             json.dump({
                 "machine": COMPUTER,
                 "pid": os.getpid(),
                 "started": datetime.now().isoformat(timespec="seconds"),
                 "started_ts": now,
             }, f, indent=2)
+        try:
+            os.replace(tmp_lock, LOCK_FILE)
+        except OSError:
+            # os.replace across some gateways fails; fall back to remove+rename
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
+            os.rename(tmp_lock, LOCK_FILE)
         return True
     except Exception as e:
         print(f"[lock] WARNING: could not write lock file ({e}); continuing without lock.")
@@ -712,6 +802,23 @@ def sync_single_file(local_path, nas_path, state, key):
         skipped += 1
         return "skip"
 
+    # --- Hot-file guard (2026-11-09, live-session transcript) ----------------
+    # A transcript being written RIGHT NOW (WorkBuddy appends to the active
+    # session's .jsonl continuously) has: hash that changes mid-copy, utime
+    # blocked by the writer, and a push that never verifies. Worse, next run
+    # sees the cloud copy as "newer" (cloud mtime = upload time) and tries to
+    # OVERWRITE the live local file with a stale snapshot — sandbox-kill or,
+    # without a sandbox, a rolled-back conversation. Skip files modified within
+    # the last 2 minutes; they sync naturally once the session goes idle.
+    if local_exists:
+        try:
+            age = time.time() - os.stat(local_path).st_mtime
+            if age < 120:
+                skipped += 1
+                return "skip (hot file, <2min old — active session?)"
+        except OSError:
+            pass
+
     last_hash = state.get(key)
     local_h = file_hash(local_path) if local_exists else None
     nas_h = file_hash(nas_path) if nas_exists else None
@@ -725,8 +832,7 @@ def sync_single_file(local_path, nas_path, state, key):
             res = _ws_tombstone_intercept(key, local_path, TRASH_LOCAL, state)
             if res:
                 return res
-            os.makedirs(os.path.dirname(nas_path), exist_ok=True)
-            safe_copy2(local_path, nas_path)
+            safe_copy2(local_path, nas_path)  # safe_copy2 已内建 stepwise makedirs + 重试
             state[key] = local_h
             pushed.append(key)
             return "pushed -> NAS (cold start)"
@@ -769,14 +875,12 @@ def sync_single_file(local_path, nas_path, state, key):
                 res = _ws_tombstone_intercept(key, nas_path, TRASH_NAS, state)
                 if res:
                     return res
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                safe_copy2(nas_path, local_path)
+                safe_copy2(nas_path, local_path)  # 内建 makedirs
                 pulled.append(key)
                 return "pulled <- NAS (from other PC)"
             else:
                 state.pop(key, None)
                 return "state cleanup"
-        os.makedirs(os.path.dirname(nas_path), exist_ok=True)
         safe_copy2(local_path, nas_path)
         state[key] = local_h
         pushed.append(key)
@@ -792,7 +896,6 @@ def sync_single_file(local_path, nas_path, state, key):
                 res = _ws_tombstone_intercept(key, local_path, TRASH_LOCAL, state)
                 if res:
                     return res
-                os.makedirs(os.path.dirname(nas_path), exist_ok=True)
                 safe_copy2(local_path, nas_path)
                 state[key] = local_h
                 pushed.append(key)
@@ -800,7 +903,6 @@ def sync_single_file(local_path, nas_path, state, key):
             else:
                 state.pop(key, None)
                 return "state cleanup"
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
         safe_copy2(nas_path, local_path)
         state[key] = nas_h
         pulled.append(key)
@@ -902,32 +1004,66 @@ def sync_dir_bidirectional(state, local_base, nas_base, prefix, print_each=False
                 nas_files[f"{prefix}/{rel}"] = full
     all_keys = set(local_files) | set(nas_files)
     changed = 0
+    failed_items = []   # (rel, error) — gateway may reject specific paths; don't abort the whole run
     for key in sorted(all_keys):
         rel = key[len(prefix) + 1:]
         local_p = os.path.join(local_base, rel.replace("/", os.sep))
         nas_p = os.path.join(nas_base, rel.replace("/", os.sep))
-        result = sync_single_file(local_p, nas_p, state, key)
+        try:
+            result = sync_single_file(local_p, nas_p, state, key)
+        except (OSError, IOError) as e:
+            # Cloud-track resilience (2026-11-09): a single path being rejected
+            # by the cloud API (ghost dir / rate limit / transient 5xx) must not
+            # abort the remaining thousands of files. Record and continue; the
+            # item will retry naturally on the next run.
+            failed_items.append((rel, str(e)))
+            print(f"  [FAIL-ISOLATED] {rel}: {type(e).__name__}: {e}", flush=True)
+            continue
         if print_each and result not in ("skip", "skip (identical)", "skip (identical, cold start)"):
             print(f"  {rel}: {result}")
             changed += 1
+    if failed_items:
+        print(f"  [WARN] {len(failed_items)} item(s) failed this run (will retry next run):")
+        for rel, err in failed_items[:10]:
+            print(f"    - {rel}  ({err[:120]})")
+        if len(failed_items) > 10:
+            print(f"    ... and {len(failed_items) - 10} more")
     return changed
 
 
 def main():
     global skipped
 
-    # --- Fast NAS reachability pre-check (avoid SMB hang on dead UNC path) ---
-    host = _nas_host(NAS_ROOT)
-    print(f"Checking NAS ({host}) reachability ...")
-    if not nas_reachable(host, timeout=2.5):
-        print("ERROR: NAS host unreachable within 4s (no answer on TCP 445/139).")
-        print("  This machine likely cannot reach the NAS right now. Common causes:")
-        print("    - You're on a different network (e.g. home PC vs office NAS IP).")
-        print("    - VPN / Tailscale / WireGuard is disconnected.")
-        print("    - The NAS is off, or its IP address changed.")
-        print("  NAS_ROOT = " + NAS_ROOT)
-        print("  Fix: connect to the same network / VPN as the NAS, then re-run.")
-        sys.exit(1)
+    # --- Fast reachability pre-check (avoid SMB hang on dead UNC path) ---
+    # Dual-track (2026-11-09): a drive-letter root (Z:\... via WB_SYNC_ROOT,
+    # mounted by RaiDrive/CloudDrive2/OpenList) is NOT an SMB host — the old
+    # TCP-445 probe would always fail. Branch on the path type instead.
+    if os.path.splitdrive(os.path.abspath(NAS_ROOT))[0] and not NAS_ROOT.startswith("\\\\"):
+        drive, _ = os.path.splitdrive(os.path.abspath(NAS_ROOT))
+        print(f"Checking mounted drive ({drive}) reachability ...")
+        ok, detail = drive_reachable(NAS_ROOT)
+        if not ok:
+            print("ERROR: mounted sync drive is not usable.")
+            print(f"  Detail: {detail}")
+            print("  Common causes:")
+            print("    - RaiDrive / CloudDrive2 / OpenList gateway is not running.")
+            print("    - The upstream cloud drive rejected the request (auth / rate limit).")
+            print("  NAS_ROOT = " + NAS_ROOT)
+            print("  Fix: start the gateway software, verify the drive in Explorer, re-run.")
+            sys.exit(1)
+        print(f"  ({detail})")
+    else:
+        host = _nas_host(NAS_ROOT)
+        print(f"Checking NAS ({host}) reachability ...")
+        if not nas_reachable(host, timeout=2.5):
+            print("ERROR: NAS host unreachable within 4s (no answer on TCP 445/139).")
+            print("  This machine likely cannot reach the NAS right now. Common causes:")
+            print("    - You're on a different network (e.g. home PC vs office NAS IP).")
+            print("    - VPN / Tailscale / WireGuard is disconnected.")
+            print("    - The NAS is off, or its IP address changed.")
+            print("  NAS_ROOT = " + NAS_ROOT)
+            print("  Fix: connect to the same network / VPN as the NAS, then re-run.")
+            sys.exit(1)
 
     if not os.path.isdir(NAS_ROOT):
         print("ERROR: NAS host is reachable, but the share path was not found:")
@@ -938,7 +1074,7 @@ def main():
     machine, machine_label = detect_machine()
     print(f"[Machine] 当前运行机: {machine} = {machine_label}")
     if machine not in KNOWN_MACHINES:
-        print("  [WARN] COMPUTERNAME 不在 KNOWN_MACHINES 清单，请先在 KNOWN_MACHINES 中登记本机名。")
+        print("  [WARN] COMPUTERNAME 不在 KNOWN_MACHINES 清单，请先在 KNOWN_MACHINES 登记本机名。")
     print(f"Two-way sync: {machine} <--> NAS")
     print("=" * 50)
 
@@ -1096,7 +1232,7 @@ def main():
     #   ~/.workbuddy/projects/<workspace-path-encoded>/<sessionId>.jsonl
     # These are KEYED BY sessionId (the same id merged by sessions-merge.py) and the
     # workspace sub-dir name encodes the absolute path (identical on both PCs since
-    # both use %USERPROFILE%\WorkBuddy\...). So syncing this dir is fully portable and
+    # both use C:\Users\yyfen\WorkBuddy\...). So syncing this dir is fully portable and
     # is what the UI reads when you open a session / click a task.
     # Synced ADDITIVELY (copy what the other side lacks; never delete/overwrite local).
     print("\n[Conversation transcripts]  ~/.workbuddy/projects/  (keyed by sessionId)")
@@ -1124,10 +1260,10 @@ def main():
                  # from requirements (like node_modules); syncing them pushes
                  # thousands of site-packages files over SMB and looks frozen.
                  ".venv", ".venv2", "venv", ".env", "env",
-                 # Crash dumps written by local services (e.g. .dmp files from
-                 # background tools). These are transient + machine-specific +
-                 # cleaned up by the running service; a .dmp vanishing mid-sync
-                 # caused a TOCTOU crash. Never sync this directory.
+                 # chatlog-core.exe crash dumps from the wxstar local service.
+                 # These are transient + machine-specific + cleaned up by the
+                 # running service; a .dmp vanishing mid-sync caused a TOCTOU
+                 # crash. Never sync this directory.
                  "dumps"}
     SKIP_EXT = {".pyc", ".pyo", ".log", ".tmp", ".dmp"}
     IGNORE_PATTERNS = load_ignore_patterns()
@@ -1161,7 +1297,7 @@ def main():
                     continue
                 # NOTE: ignore patterns in sync-ignore.txt are written relative to the
                 # workspace-FILES root and INCLUDE the workspace-name prefix
-                # (e.g. "2026-01-15-10-30-00/mytask/decrypted/"), but `rel` here is
+                # (e.g. "2026-09-24-11-27-28/wxstar/decrypted/"), but `rel` here is
                 # relative to the individual workspace folder (no prefix). Prefix it
                 # back so is_ignored() can match the documented patterns.
                 ig_rel = ((ws_name + "/") if ws_name else "") + rel.replace(os.sep, "/")
